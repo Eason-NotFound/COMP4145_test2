@@ -88,4 +88,5 @@ Find why the deployed page did not load when the user selected Streamlit Cloud a
 - 13 unit tests pass.
 - Streamlit AppTest renders logged-out and authenticated views; all four tabs render with no script exceptions.
 - Python compilation and `pip check` pass.
+- A local Streamlit server returned HTTP 200 on port 8502; the server was stopped after the smoke check.
 - Live HKBU API and cloud deployment remain untested; no service URL/log access was provided.
