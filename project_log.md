@@ -1,6 +1,6 @@
 # SkinTrack project log
 
-## 2026-10-21 — Initial implementation and prototype delivery
+## 2026-10-21 — Initial implementation and prototype delivery (Gradio)
 
 ### Objective
 Read the COMP4145 Lab 2 Idea 2 brief, build the requested single-file Gradio prototype and three additions, and validate the core behavior.
@@ -67,3 +67,25 @@ Provide an in-app field so the user can enter their HKBU API key without editing
 Automated test confirms a manually supplied key is passed in the authorization header and does not require environment configuration; full suite rerun below.
 
 Result: 13 tests passed; the Gradio page with the new field returned HTTP 200 locally. No real HKBU request was made.
+
+## 2026-10-21 — Diagnose Streamlit Cloud loading failure and migrate UI
+
+### Objective
+Find why the deployed page did not load when the user selected Streamlit Cloud and align the application with the requested Streamlit platform.
+
+### Root cause
+- The GitHub deployment commit used a Gradio application in `app.py`, and `requirements.txt` did not install Streamlit.
+- Streamlit Cloud executes the configured entry point as a Streamlit script; the old entry point instead constructed and launched a Gradio server. Streamlit's public proxy does not serve that embedded Gradio server as the app page.
+- After migration, the first UI smoke run uncovered an additional Streamlit 1.50 incompatibility: `st.file_uploader()` has no `max_upload_size` argument. The argument was removed; the upload cap is set in `.streamlit/config.toml` and independently validated against file size in application code.
+- Dependency resolution also exposed incompatible old pins (`pandas==3.0.6` and `Pillow==12.3.0`) with Streamlit 1.50. Compatible versions were pinned after installation.
+
+### Changes made
+- Replaced the Gradio entry point with a Streamlit app while retaining image/API analysis, login, profile, history/trends, and routine features.
+- Updated dependencies, Streamlit theme/upload config, and Streamlit Community Cloud deployment instructions.
+- Added a minimal two-account server-validated sign-in flow backed by environment variables or Streamlit Secrets.
+
+### Tests
+- 13 unit tests pass.
+- Streamlit AppTest renders logged-out and authenticated views; all four tabs render with no script exceptions.
+- Python compilation and `pip check` pass.
+- Live HKBU API and cloud deployment remain untested; no service URL/log access was provided.

@@ -1,6 +1,6 @@
-gradio==6.30.0
+streamlit==1.50.0
 requests==2.34.2
 python-dotenv==1.2.4
-pandas==3.0.6
+pandas==2.3.3
 plotly==7.1.0
-Pillow==12.3.0
+Pillow==11.3.0

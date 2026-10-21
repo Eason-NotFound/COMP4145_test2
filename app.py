@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import logging
 import os
@@ -14,10 +15,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import gradio as gr
 import pandas as pd
 import plotly.graph_objects as go
 import requests
+import streamlit as st
 from dotenv import load_dotenv
 from PIL import Image, UnidentifiedImageError
 
@@ -26,12 +27,6 @@ APP_DIR = Path(__file__).resolve().parent
 LOGGER = logging.getLogger(__name__)
 load_dotenv(APP_DIR / ".env")
 DB_PATH = Path(os.getenv("SKINTRACK_DB_PATH", APP_DIR / "skintrack.db"))
-APP_CSS = """
-.gradio-container { max-width: 1180px !important; background: #f7faf7; }
-.skintrack-header { padding: 22px 26px; border-radius: 18px; background: linear-gradient(120deg,#e7f1e7,#f4f8ef); }
-.skintrack-header h1 { color: #254f3a; margin-bottom: 4px; }
-.metric-card { border: 1px solid #dce8dd; border-radius: 14px; padding: 14px; background: white; }
-"""
 API_URL_DEFAULT = (
     "https://genai.hkbu.edu.hk/api/v0/rest/deployments/"
     "gemini-2.5-pro/chat/completions?api-version=v1"
@@ -45,9 +40,19 @@ class SkinTrackError(Exception):
     """An expected, user-safe application error."""
 
 
+def configured_value(name: str, default: str = "") -> str:
+    environment_value = os.getenv(name)
+    if environment_value:
+        return environment_value
+    try:
+        return str(st.secrets.get(name, default))
+    except st.errors.StreamlitSecretNotFoundError:
+        return default
+
+
 def get_api_config(api_key_input: str | None = None) -> tuple[str, str]:
-    api_key = (api_key_input or os.getenv("HKBU_API_KEY", "")).strip()
-    api_url = os.getenv("HKBU_API_URL", API_URL_DEFAULT).strip()
+    api_key = (api_key_input or configured_value("HKBU_API_KEY")).strip()
+    api_url = configured_value("HKBU_API_URL", API_URL_DEFAULT).strip()
     if not api_key:
         raise SkinTrackError(
             "Enter your HKBU API key above or configure HKBU_API_KEY in .env."
@@ -88,8 +93,8 @@ def initialize_database() -> None:
         )
 
 
-def authenticated_user(request: gr.Request | None) -> str:
-    username = getattr(request, "username", None) if request else None
+def authenticated_user(request: Any | None) -> str:
+    username = request if isinstance(request, str) else getattr(request, "username", None)
     if not username:
         raise SkinTrackError("Your session could not be verified. Please sign in again.")
     return str(username)
@@ -265,12 +270,12 @@ def _profile_values(username: str) -> tuple[str, str, str, str]:
     return tuple(row) if row else ("", "", "", "")
 
 
-def load_profile(request: gr.Request) -> tuple[str, str, str, str]:
+def load_profile(request: Any) -> tuple[str, str, str, str]:
     return _profile_values(authenticated_user(request))
 
 
 def save_profile(
-    skin_type: str, concerns: str, budget: str, avoid_ingredients: str, request: gr.Request
+    skin_type: str, concerns: str, budget: str, avoid_ingredients: str, request: Any
 ) -> str:
     username = authenticated_user(request)
     initialize_database()
@@ -298,7 +303,7 @@ def save_profile(
     return "Profile saved."
 
 
-def save_analysis(parsed: dict[str, Any] | None, request: gr.Request) -> str:
+def save_analysis(parsed: dict[str, Any] | None, request: Any) -> str:
     if not parsed:
         return "Run a successful analysis before saving a history record."
     username = authenticated_user(request)
@@ -338,7 +343,7 @@ def get_history(username: str) -> pd.DataFrame:
     )
 
 
-def history_view(request: gr.Request) -> tuple[pd.DataFrame, go.Figure, str]:
+def history_view(request: Any) -> tuple[pd.DataFrame, go.Figure, str]:
     username = authenticated_user(request)
     history = get_history(username)
     figure = go.Figure()
@@ -374,7 +379,7 @@ def history_view(request: gr.Request) -> tuple[pd.DataFrame, go.Figure, str]:
     return history, figure, info
 
 
-def delete_history(record_id: int | float | None, request: gr.Request) -> tuple[str, pd.DataFrame, go.Figure, str]:
+def delete_history(record_id: int | float | None, request: Any) -> tuple[str, pd.DataFrame, go.Figure, str]:
     username = authenticated_user(request)
     if record_id is None:
         message = "Enter a record ID from your history."
@@ -439,7 +444,7 @@ def build_routine(
     return morning, evening
 
 
-def refresh_routine(request: gr.Request) -> tuple[str, str]:
+def refresh_routine(request: Any) -> tuple[str, str]:
     username = authenticated_user(request)
     skin_type, concerns, budget, avoid = _profile_values(username)
     return build_routine(skin_type, concerns, budget, avoid)
@@ -457,129 +462,242 @@ def remove_temp_upload(image_path: str | None) -> None:
         LOGGER.warning("Could not clean up a temporary uploaded image (%s).", type(exc).__name__)
 
 
-def make_app() -> gr.Blocks:
-    initialize_database()
-    with gr.Blocks(title="SkinTrack | Skin Analysis") as demo:
-        gr.HTML(
-            "<div class='skintrack-header'><h1>SkinTrack</h1>"
-            "<p>A private skincare tracking prototype · General information, not medical advice</p></div>"
-        )
-        with gr.Tabs():
-            with gr.Tab("Skin Analysis"):
-                gr.Markdown(
-                    "Upload a JPEG, PNG, or WebP face photo (max 8 MB). If you proceed, the image is sent "
-                    "to the configured HKBU analysis service for processing; it is not saved in SkinTrack's database."
-                )
-                api_key_input = gr.Textbox(
-                    label="HKBU API key (optional if configured in .env)",
-                    type="password",
-                    placeholder="Paste your API key here",
-                    info="Used only for this analysis request; never stored in the database or project files.",
-                )
-                image = gr.Image(type="filepath", label="Face photo", sources=["upload"])
-                consent = gr.Checkbox(
-                    label="I understand and consent to sending this photo to the configured analysis service.",
-                    value=False,
-                )
-                analyze_button = gr.Button("Analyze photo", variant="primary")
-                status = gr.Markdown("Waiting for a photo.")
-                with gr.Row():
-                    cleanliness = gr.Textbox(label="Skin Cleanliness KPI", value="—", interactive=False)
-                    quality = gr.Textbox(label="Skin Quality KPI", value="—", interactive=False)
-                result_text = gr.Markdown()
-                result_state = gr.State(None)
-                analyze_button.click(
-                    analyze_image,
-                    inputs=[image, consent, api_key_input],
-                    outputs=[status, cleanliness, quality, result_text, result_state],
-                    show_progress="full",
-                ).then(remove_temp_upload, inputs=[image], outputs=None).then(
-                    lambda: "",
-                    inputs=None,
-                    outputs=[api_key_input],
-                )
-                save_button = gr.Button("Save this analysis to my history")
-                save_status = gr.Markdown()
-                save_button.click(save_analysis, inputs=[result_state], outputs=[save_status])
-
-            with gr.Tab("My Profile"):
-                gr.Markdown("Your self-reported details guide general routine suggestions. No open registration is enabled.")
-                skin_type = gr.Dropdown(
-                    ["", "Normal", "Dry", "Oily", "Combination", "Sensitive", "Not sure"],
-                    label="Skin type (self-reported)",
-                    value="",
-                    allow_custom_value=True,
-                )
-                concerns = gr.Textbox(label="Focus concerns", placeholder="e.g., dryness, sensitivity, uneven tone")
-                budget = gr.Textbox(label="Budget", placeholder="e.g., under HKD 300 per product")
-                avoid = gr.Textbox(label="Ingredients to avoid", placeholder="Comma-separated, based on your preference")
-                profile_status = gr.Markdown()
-                gr.Button("Save profile", variant="primary").click(
-                    save_profile,
-                    inputs=[skin_type, concerns, budget, avoid],
-                    outputs=[profile_status],
-                )
-                demo.load(load_profile, outputs=[skin_type, concerns, budget, avoid])
-
-            with gr.Tab("History"):
-                gr.Markdown(
-                    "Only your signed-in account's saved analyses are shown. Trends describe model output changes, "
-                    "not proof of skin improvement or product effectiveness."
-                )
-                history_table = gr.Dataframe(
-                    headers=["ID", "Created (UTC)", "Skin Cleanliness", "Skin Quality", "Description", "Estimated Age"],
-                    interactive=False,
-                    label="Saved analyses",
-                )
-                trend_plot = gr.Plot(label="KPI trend")
-                history_note = gr.Markdown()
-                history_status = gr.Markdown()
-                refresh_button = gr.Button("Refresh history")
-                refresh_button.click(history_view, outputs=[history_table, trend_plot, history_note])
-                delete_id = gr.Number(label="Record ID to delete", precision=0)
-                gr.Button("Delete my record").click(
-                    delete_history,
-                    inputs=[delete_id],
-                    outputs=[history_status, history_table, trend_plot, history_note],
-                )
-                demo.load(history_view, outputs=[history_table, trend_plot, history_note])
-
-            with gr.Tab("My Routine"):
-                gr.Markdown(
-                    "Recommendations are transparent, rules-based general skincare information. "
-                    "Your self-reported profile is primary; image analysis is not used to diagnose."
-                )
-                morning = gr.Markdown()
-                evening = gr.Markdown()
-                gr.Button("Generate my routine", variant="primary").click(
-                    refresh_routine, outputs=[morning, evening]
-                )
-                demo.load(refresh_routine, outputs=[morning, evening])
-        image.clear(remove_temp_upload, inputs=[image], outputs=None)
-    return demo
-
-
 def _auth_credentials() -> list[tuple[str, str]]:
     accounts = []
     for index in (1, 2):
-        username = os.getenv(f"SKINTRACK_USER{index}", "").strip()
-        password = os.getenv(f"SKINTRACK_PASSWORD{index}", "")
+        username = configured_value(f"SKINTRACK_USER{index}").strip()
+        password = configured_value(f"SKINTRACK_PASSWORD{index}")
         if username and password:
             accounts.append((username, password))
     return accounts
 
 
-if __name__ == "__main__":
-    app = make_app()
+def _render_login(credentials: list[tuple[str, str]]) -> None:
+    st.title("SkinTrack")
+    st.caption("Sign in to access your private skincare workspace.")
+    with st.form("login_form"):
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Sign in", type="primary")
+    if submitted:
+        if any(
+            hmac.compare_digest(username, saved_username)
+            and hmac.compare_digest(password, saved_password)
+            for saved_username, saved_password in credentials
+        ):
+            st.session_state["authenticated_user"] = username
+            st.rerun()
+        st.error("The username or password is incorrect.")
+
+
+def _render_streamlit_app() -> None:
+    st.set_page_config(page_title="SkinTrack", page_icon="🌿", layout="wide")
+    st.markdown(
+        """
+        <style>
+        .stApp { background: #f7faf7; }
+        [data-testid="stHeader"] { background: rgba(0,0,0,0); }
+        div[data-testid="stMetric"] {
+            background: white; border: 1px solid #dce8dd;
+            padding: 16px; border-radius: 14px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
     credentials = _auth_credentials()
     if len(credentials) != 2 or len({username for username, _ in credentials}) != 2:
-        raise SystemExit(
-            "Configure two distinct SKINTRACK_USERn / SKINTRACK_PASSWORDn pairs "
-            "in .env or the deployment environment before launch."
+        st.error(
+            "Configure two distinct SKINTRACK_USER1 / SKINTRACK_PASSWORD1 and "
+            "SKINTRACK_USER2 / SKINTRACK_PASSWORD2 pairs in Streamlit Secrets or .env."
         )
-    app.launch(
-        auth=credentials,
-        theme=gr.themes.Soft(primary_hue="green"),
-        css=APP_CSS,
-        show_error=True,
+        st.stop()
+
+    if st.session_state.pop("_clear_analysis_key", False):
+        st.session_state["analysis_api_key"] = ""
+
+    username = st.session_state.get("authenticated_user")
+    if not username:
+        _render_login(credentials)
+        return
+
+    try:
+        initialize_database()
+    except sqlite3.Error:
+        LOGGER.exception("Could not initialize SkinTrack SQLite database.")
+        st.error("SkinTrack could not initialize its database. Check the configured storage path.")
+        st.stop()
+
+    with st.sidebar:
+        st.markdown(f"Signed in as **{username}**")
+        if st.button("Sign out"):
+            st.session_state.clear()
+            st.rerun()
+
+    st.title("🌿 SkinTrack")
+    st.caption("A private skincare tracking prototype · General information, not medical advice")
+    analysis_tab, profile_tab, history_tab, routine_tab = st.tabs(
+        ["Skin Analysis", "My Profile", "History", "My Routine"]
     )
+
+    with analysis_tab:
+        st.markdown(
+            "Upload a JPEG, PNG, or WebP face photo (max 8 MB). If you proceed, the image is sent "
+            "to the configured HKBU analysis service for processing; it is not saved in SkinTrack's database."
+        )
+        api_key_input = st.text_input(
+            "HKBU API key (optional if configured in Streamlit Secrets)",
+            type="password",
+            key="analysis_api_key",
+            help="Used only for this analysis request; not saved to the database or project files.",
+        )
+        uploaded_image = st.file_uploader(
+            "Face photo",
+            type=["jpg", "jpeg", "png", "webp"],
+            key="analysis_image",
+        )
+        if uploaded_image:
+            st.image(uploaded_image, caption="Photo preview", width="stretch")
+        consent = st.checkbox(
+            "I understand and consent to sending this photo to the configured analysis service.",
+            key="analysis_consent",
+        )
+        if st.button("Analyze photo", type="primary", key="analyze_button"):
+            if uploaded_image is None:
+                st.session_state["analysis_status"] = (
+                    "Upload a face photo before starting an analysis.",
+                    "error",
+                )
+                st.session_state["analysis_result"] = None
+            elif not consent:
+                st.session_state["analysis_status"] = (
+                    "Confirm photo processing consent to continue.",
+                    "error",
+                )
+                st.session_state["analysis_result"] = None
+            else:
+                temp_path = None
+                try:
+                    suffix = Path(uploaded_image.name).suffix or ".img"
+                    with tempfile.NamedTemporaryFile(
+                        mode="wb", suffix=suffix, dir=tempfile.gettempdir(), delete=False
+                    ) as temp_image:
+                        temp_image.write(uploaded_image.getvalue())
+                        temp_path = temp_image.name
+                    with st.spinner("Analyzing photo securely..."):
+                        result = analyze_image(temp_path, True, api_key_input)
+                    st.session_state["analysis_status"] = (
+                        result[0],
+                        "success" if result[4] else "error",
+                    )
+                    st.session_state["analysis_result"] = result
+                    st.session_state["analysis_saved"] = False
+                finally:
+                    if temp_path:
+                        remove_temp_upload(temp_path)
+            st.session_state["_clear_analysis_key"] = True
+            st.rerun()
+
+        status = st.session_state.get("analysis_status")
+        if status:
+            getattr(st, status[1])(status[0])
+        analysis = st.session_state.get("analysis_result")
+        if analysis:
+            left, right = st.columns(2)
+            left.metric("Skin Cleanliness KPI", analysis[1])
+            right.metric("Skin Quality KPI", analysis[2])
+            st.markdown(analysis[3])
+            parsed = analysis[4]
+            already_saved = st.session_state.get("analysis_saved", False)
+            if st.button(
+                "Saved to history" if already_saved else "Save this analysis to my history",
+                disabled=not parsed or already_saved,
+            ):
+                st.success(save_analysis(parsed, username))
+                st.session_state["analysis_saved"] = True
+
+    with profile_tab:
+        st.markdown(
+            "Your self-reported details guide general routine suggestions. "
+            "Only this signed-in account can access its profile."
+        )
+        current_profile = _profile_values(username)
+        profile_key = f"profile_{username}_"
+        st.session_state.setdefault(profile_key + "skin_type", current_profile[0])
+        st.session_state.setdefault(profile_key + "concerns", current_profile[1])
+        st.session_state.setdefault(profile_key + "budget", current_profile[2])
+        st.session_state.setdefault(profile_key + "avoid", current_profile[3])
+        with st.form("profile_form"):
+            skin_type = st.selectbox(
+                "Skin type (self-reported)",
+                ["", "Normal", "Dry", "Oily", "Combination", "Sensitive", "Not sure"],
+                key=profile_key + "skin_type",
+            )
+            concerns = st.text_input(
+                "Focus concerns",
+                placeholder="e.g., dryness, sensitivity, uneven tone",
+                key=profile_key + "concerns",
+            )
+            budget = st.text_input(
+                "Budget",
+                placeholder="e.g., under HKD 300 per product",
+                key=profile_key + "budget",
+            )
+            avoid = st.text_input(
+                "Ingredients to avoid",
+                placeholder="Comma-separated",
+                key=profile_key + "avoid",
+            )
+            save_profile_button = st.form_submit_button("Save profile", type="primary")
+        if save_profile_button:
+            st.success(save_profile(skin_type, concerns, budget, avoid, username))
+
+    with history_tab:
+        st.markdown(
+            "Trends describe model output changes only, not proof of skin improvement or product effectiveness."
+        )
+        history = get_history(username)
+        if history.empty:
+            st.info("No saved analyses yet. Run and save an analysis to begin your history.")
+        else:
+            st.dataframe(history, hide_index=True, use_container_width=True)
+            history, figure, note = history_view(username)
+            st.plotly_chart(figure, use_container_width=True)
+            st.caption(note)
+            record_ids = [int(record_id) for record_id in history["ID"].tolist()]
+            selected_id = st.selectbox("Record details", record_ids, format_func=lambda value: f"Record {value}")
+            selected = history.loc[history["ID"] == selected_id].iloc[0]
+            st.markdown(f"**Description:** {selected['Description']}")
+            st.markdown(
+                f"**Estimated Age:** {selected['Estimated Age']} "
+                "*(rough, unreliable estimate)*"
+            )
+            with st.form("delete_history_form"):
+                delete_id = st.selectbox("Select a record to delete", record_ids)
+                delete_clicked = st.form_submit_button("Delete selected record")
+            if delete_clicked:
+                message, _, _, _ = delete_history(delete_id, username)
+                if message == "Record deleted.":
+                    st.success(message)
+                    st.rerun()
+                st.error(message)
+
+    with routine_tab:
+        st.markdown(
+            "Transparent, rules-based general skincare information. Your self-reported profile is primary; "
+            "image analysis is not used to diagnose."
+        )
+        skin_type, concerns, budget, avoid = _profile_values(username)
+        morning, evening = build_routine(skin_type, concerns, budget, avoid)
+        morning_col, evening_col = st.columns(2)
+        with morning_col:
+            st.subheader("Morning")
+            st.markdown(morning)
+        with evening_col:
+            st.subheader("Evening")
+            st.markdown(evening)
+
+
+if __name__ == "__main__":
+    _render_streamlit_app()
